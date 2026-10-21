@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2022 The TensorFlow Authors. All Rights Reserved.
  *
@@ -30,9 +29,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
-import androidx.navigation.Navigation
 import org.tensorflow.lite.examples.objectdetection.ObjectDetectorHelper
-import org.tensorflow.lite.examples.objectdetection.R
 import org.tensorflow.lite.examples.objectdetection.databinding.FragmentCameraBinding
 import org.tensorflow.lite.task.vision.detector.Detection
 import java.io.DataOutputStream
@@ -46,21 +43,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class CameraFragment :
-    Fragment(),
-    ObjectDetectorHelper.DetectorListener {
+class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
     companion object {
         private const val TAG = "ObjectDetection"
-
-        // Raspberry Pi connection settings
         private const val PI_HOST = "10.242.215.42"
         private const val PI_PORT = 5001
         private const val CONNECT_TIMEOUT_MS = 3000
         private const val SOCKET_TIMEOUT_MS = 5000
         private const val MAX_AUDIO_SIZE = 10 * 1024 * 1024
-
-        // Detection speech settings
         private const val REQUIRED_STABLE_FRAMES = 3
         private const val MIN_ANNOUNCEMENT_GAP_MS = 2000L
         private const val SAME_LABEL_REPEAT_DELAY_MS = 6000L
@@ -68,9 +59,9 @@ class CameraFragment :
     }
 
     private var _fragmentCameraBinding: FragmentCameraBinding? = null
-
-    private val fragmentCameraBinding
-        get() = _fragmentCameraBinding!!
+    private val fragmentCameraBinding: FragmentCameraBinding
+        get() = _fragmentCameraBinding
+            ?: throw IllegalStateException("FragmentCameraBinding is only valid between onCreateView and onDestroyView")
 
     private lateinit var objectDetectorHelper: ObjectDetectorHelper
     private lateinit var bitmapBuffer: Bitmap
@@ -82,14 +73,23 @@ class CameraFragment :
     private var camera: Camera? = null
     private var cameraProvider: ProcessCameraProvider? = null
 
-    // Text-to-Speech
     private var textToSpeech: TextToSpeech? = null
     private var ttsReady = false
     private var speechPending = false
-
-    // Synthesized audio files, indexed by utterance ID
     private val audioFiles = ConcurrentHashMap<String, File>()
 
-    // Stable detection tracking
     private var candidateLabel = ""
     private var candidateCount = 0
+    private var lastAnnouncedLabel = ""
+    private var lastAnnouncementTime = 0L
+    private var lastLabelAnnouncementTime = 0L
+    private var utteranceCounter = 0L
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
+        return fragmentCameraBinding.root
+    }
