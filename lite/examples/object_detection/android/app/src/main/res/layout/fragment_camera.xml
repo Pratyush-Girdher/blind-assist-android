@@ -1,12 +1,4 @@
 
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-    Copyright 2022 The TensorFlow Authors. All Rights Reserved.
-
-    Licensed under the Apache License, Version 2.0.
-    You may obtain a copy of the License at:
-    http://www.apache.org/licenses/LICENSE-2.0
--->
 <androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
