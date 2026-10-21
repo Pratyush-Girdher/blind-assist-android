@@ -1,123 +1,95 @@
-        }
 
-        val binding = _fragmentCameraBinding ?: return
+/*
+ * Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0.
+ * See https://www.apache.org/licenses/LICENSE-2.0
+ */
 
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-            .build()
+package org.tensorflow.lite.examples.objectdetection.fragments
 
-        preview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .setTargetRotation(binding.viewFinder.display.rotation)
-            .build()
+import android.annotation.SuppressLint
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.os.Bundle
+import android.os.SystemClock
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.Fragment
+import androidx.navigation.Navigation
+import org.tensorflow.lite.examples.objectdetection.ObjectDetectorHelper
+import org.tensorflow.lite.examples.objectdetection.R
+import org.tensorflow.lite.examples.objectdetection.databinding.FragmentCameraBinding
+import org.tensorflow.lite.task.vision.detector.Detection
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.LinkedList
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
-        imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .setTargetRotation(binding.viewFinder.display.rotation)
-            .setBackpressureStrategy(
-                ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-            )
-            .setOutputImageFormat(OUTPUT_IMAGE_FORMAT_RGBA_8888)
-            .build()
-            .also { analyzer ->
-                analyzer.setAnalyzer(cameraExecutor) { image ->
-                    try {
-                        if (_fragmentCameraBinding == null) {
-                            return@setAnalyzer
-                        }
+class CameraFragment :
+    Fragment(),
+    ObjectDetectorHelper.DetectorListener {
 
-                        if (
-                            !::bitmapBuffer.isInitialized ||
-                            bitmapBuffer.width != image.width ||
-                            bitmapBuffer.height != image.height
-                        ) {
-                            bitmapBuffer = Bitmap.createBitmap(
-                                image.width,
-                                image.height,
-                                Bitmap.Config.ARGB_8888
-                            )
-                        }
+    companion object {
+        private const val TAG = "ObjectDetection"
 
-                        detectObjects(image)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Object detection failed", e)
-                    } finally {
-                        image.close()
-                    }
-                }
-            }
+        // Raspberry Pi connection settings
+        private const val PI_HOST = "10.242.215.42"
+        private const val PI_PORT = 5001
+        private const val CONNECT_TIMEOUT_MS = 3000
+        private const val SOCKET_TIMEOUT_MS = 5000
+        private const val MAX_AUDIO_SIZE = 10 * 1024 * 1024
 
-        provider.unbindAll()
-
-        try {
-            camera = provider.bindToLifecycle(
-                this,
-                cameraSelector,
-                preview,
-                imageAnalyzer
-            )
-
-            preview?.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-        } catch (e: Exception) {
-            Log.e(TAG, "Use case binding failed", e)
-            showToast("Unable to start the camera preview.")
-        }
+        // Detection speech settings
+        private const val REQUIRED_STABLE_FRAMES = 3
+        private const val MIN_ANNOUNCEMENT_GAP_MS = 2000L
+        private const val SAME_LABEL_REPEAT_DELAY_MS = 6000L
+        private const val SPEECH_CONFIDENCE_THRESHOLD = 0.60f
     }
 
-    private fun detectObjects(image: ImageProxy) {
-        if (!::bitmapBuffer.isInitialized) return
+    private var _fragmentCameraBinding: FragmentCameraBinding? = null
 
-        bitmapBuffer.copyPixelsFromBuffer(image.planes[0].buffer)
+    private val fragmentCameraBinding
+        get() = _fragmentCameraBinding!!
 
-        objectDetectorHelper.detect(
-            bitmapBuffer,
-            image.imageInfo.rotationDegrees
-        )
-    }
+    private lateinit var objectDetectorHelper: ObjectDetectorHelper
+    private lateinit var bitmapBuffer: Bitmap
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var audioExecutor: ExecutorService
 
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
+    private var preview: Preview? = null
+    private var imageAnalyzer: ImageAnalysis? = null
+    private var camera: Camera? = null
+    private var cameraProvider: ProcessCameraProvider? = null
 
-        _fragmentCameraBinding?.let { binding ->
-            imageAnalyzer?.targetRotation =
-                binding.viewFinder.display.rotation
-        }
-    }
+    // Text-to-Speech
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsReady = false
+    private var speechPending = false
 
-    override fun onResults(
-        results: MutableList<Detection>?,
-        inferenceTime: Long,
-        imageHeight: Int,
-        imageWidth: Int
-    ) {
-        activity?.runOnUiThread {
-            val binding = _fragmentCameraBinding
-                ?: return@runOnUiThread
+    // Synthesized audio files, indexed by utterance ID
+    private val audioFiles = ConcurrentHashMap<String, File>()
 
-            binding.overlay.setResults(
-                results ?: LinkedList(),
-                imageHeight,
-                imageWidth
-            )
-
-            binding.overlay.invalidate()
-            announceDetection(results)
-        }
-    }
-
-    override fun onError(error: String) {
-        showToast(error)
-    }
-
-    private fun showToast(message: String) {
-        activity?.runOnUiThread {
-            context?.let { safeContext ->
-                Toast.makeText(
-                    safeContext,
-                    message,
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-    }
-}
+    // Stable detection tracking
+    private var candidateLabel = ""
+    private var candidateCount = 0
