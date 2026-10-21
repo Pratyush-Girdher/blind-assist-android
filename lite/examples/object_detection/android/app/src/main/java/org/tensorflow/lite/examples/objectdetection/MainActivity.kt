@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+ * Copyright 2022 The TensorFlow Authors.
  * Licensed under the Apache License, Version 2.0.
  */
 
@@ -21,13 +21,18 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Load the layout without the TensorFlow Lite toolbar and logo.
         activityMainBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(activityMainBinding.root)
 
+        // Initialize text-to-speech for audio announcements.
         textToSpeech = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val result = textToSpeech?.setLanguage(Locale.US)
-                ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
+
+                ttsReady = result != null &&
+                    result != TextToSpeech.LANG_MISSING_DATA &&
                     result != TextToSpeech.LANG_NOT_SUPPORTED
             }
         }
@@ -51,6 +56,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
             finishAfterTransition()
