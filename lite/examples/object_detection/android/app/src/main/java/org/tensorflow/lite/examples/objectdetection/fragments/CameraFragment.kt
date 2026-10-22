@@ -73,6 +73,7 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
     @Volatile private var ttsReady = false
     @Volatile private var speechPending = false
     private val audioFiles = ConcurrentHashMap<String, File>()
+    private val synthesisStartTimes = ConcurrentHashMap<String, Long>()
     private val utteranceCounter = AtomicLong(0L)
 
     private var candidateDescription = ""
@@ -126,6 +127,11 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                         // The synthesized file has its own ID; only the local speech ID
                         // controls the speechPending flag.
                         if (utteranceId.startsWith("file_")) {
+                            val started = synthesisStartTimes.remove(utteranceId)
+                            val elapsed = started?.let {
+                                SystemClock.elapsedRealtime() - it
+                            }
+                            Log.d(TAG, "SYNTH_DONE id=$utteranceId elapsedMs=$elapsed")
                             audioFiles.remove(utteranceId)?.let(::sendAudioToRaspberryPi)
                         }
                     }
@@ -149,7 +155,11 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
     private fun handleTtsError(utteranceId: String?, errorCode: Int?) {
         if (utteranceId == null) return
-        if (utteranceId.startsWith("file_")) audioFiles.remove(utteranceId)?.delete()
+        if (utteranceId.startsWith("file_")) {
+            synthesisStartTimes.remove(utteranceId)
+            audioFiles.remove(utteranceId)?.delete()
+            speechPending = false
+        }
         Log.e(TAG, "TTS error for $utteranceId; code=$errorCode")
     }
 
@@ -305,12 +315,14 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
         // Synthesize audio only. Do not call tts.speak(), which plays through the phone.
         val text = "Detected $description"
-        Log.d(TAG, "Starting WAV synthesis: $text")
+        synthesisStartTimes[fileId] = SystemClock.elapsedRealtime()
+        Log.d(TAG, "SYNTH_START id=$fileId text=$text")
         val result = tts.synthesizeToFile(text, Bundle(), outputFile, fileId)
         if (result == TextToSpeech.ERROR) {
+            synthesisStartTimes.remove(fileId)
             audioFiles.remove(fileId)?.delete()
             speechPending = false
-            Log.e(TAG, "Unable to synthesize WAV audio")
+            Log.e(TAG, "Unable to synthesize WAV audio; id=$fileId")
         }
     }
 
@@ -332,8 +344,15 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                 try {
                     val sendStartedAt = SystemClock.elapsedRealtime()
                     Socket().use { socket ->
+                        val connectStartedAt = SystemClock.elapsedRealtime()
+                        Log.d(TAG, "TCP_CONNECT_START host=$PI_HOST port=$PI_PORT")
                         socket.connect(InetSocketAddress(PI_HOST, PI_PORT), CONNECT_TIMEOUT_MS)
+                        Log.d(
+                            TAG,
+                            "TCP_CONNECT_DONE elapsedMs=${SystemClock.elapsedRealtime() - connectStartedAt}"
+                        )
                         socket.soTimeout = SOCKET_TIMEOUT_MS
+                        val transferStartedAt = SystemClock.elapsedRealtime()
                         DataOutputStream(socket.getOutputStream()).use { output ->
                             output.writeInt(file.length().toInt())
                             FileInputStream(file).use { input ->
@@ -349,11 +368,15 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                                 output.flush()
                             }
                         }
+                        Log.d(
+                            TAG,
+                            "TCP_TRANSFER_DONE elapsedMs=${SystemClock.elapsedRealtime() - transferStartedAt}"
+                        )
                     }
                     Log.d(
                         TAG,
-                        "Audio sent to Raspberry Pi at $PI_HOST:$PI_PORT in " +
-                            "${SystemClock.elapsedRealtime() - sendStartedAt} ms"
+                        "Audio sent to Raspberry Pi at $PI_HOST:$PI_PORT; totalElapsedMs=" +
+                            "${SystemClock.elapsedRealtime() - sendStartedAt}"
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to send audio to Raspberry Pi", e)
@@ -403,6 +426,7 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             speechPending = false
             audioFiles.values.forEach { it.delete() }
             audioFiles.clear()
+            synthesisStartTimes.clear()
             bitmapBuffer?.recycle()
             bitmapBuffer = null
         } catch (e: Exception) {
