@@ -98,7 +98,14 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
         binding.viewFinder.implementationMode =
             androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
 
+        // Fixed detector configuration: no runtime settings controls.
+        // Keep MobileNet V1 to match the model selected in your current app.
         objectDetectorHelper = ObjectDetectorHelper(
+            threshold = 0.45f,
+            numThreads = 4,
+            maxResults = 5,
+            currentDelegate = ObjectDetectorHelper.DELEGATE_CPU,
+            currentModel = ObjectDetectorHelper.MODEL_MOBILENETV1,
             context = requireContext(),
             objectDetectorListener = this
         )
