@@ -17,6 +17,7 @@
         android:name="android.hardware.camera"
         android:required="true" />
 
+    <!-- Required permissions -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -57,4 +58,5 @@
 
         </activity>
     </application>
+
 </manifest>
