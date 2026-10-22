@@ -45,7 +45,7 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
     companion object {
         private const val TAG = "ThirdEye"
-        private const val PI_HOST = "10.242.215.42"
+        private const val PI_HOST = "10.117.36.42"
         private const val PI_PORT = 5001
         private const val CONNECT_TIMEOUT_MS = 3000
         private const val SOCKET_TIMEOUT_MS = 5000
