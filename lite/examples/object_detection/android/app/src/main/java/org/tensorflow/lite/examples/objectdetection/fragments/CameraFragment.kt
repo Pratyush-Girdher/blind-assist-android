@@ -487,9 +487,10 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                         }
                     }
 
-                    Log.d(
+                    Log.i(
                         TAG,
-                        "Audio sent to Raspberry Pi at $PI_HOST:$PI_PORT"
+                        "WAV bytes transmitted to Raspberry Pi at $PI_HOST:$PI_PORT; " +
+                            "this confirms transfer only, not playback"
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to send audio to Raspberry Pi", e)
