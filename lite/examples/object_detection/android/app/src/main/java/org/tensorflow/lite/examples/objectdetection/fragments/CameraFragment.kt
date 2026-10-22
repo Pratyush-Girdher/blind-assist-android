@@ -143,10 +143,12 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                             if (utteranceId == null) return
 
                             if (utteranceId.startsWith("file_")) {
-                                audioFiles.remove(utteranceId)
-                                    ?.let { sendAudioToRaspberryPi(it) }
-                            } else if (utteranceId.startsWith("local_")) {
-                                speechPending = false
+                                val audioFile = audioFiles.remove(utteranceId)
+                                if (audioFile != null) {
+                                    sendAudioToRaspberryPi(audioFile)
+                                } else {
+                                    speechPending = false
+                                }
                             }
                         }
 
@@ -182,7 +184,7 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             audioFiles.remove(utteranceId)?.delete()
         }
 
-        if (utteranceId.startsWith("local_")) {
+        if (utteranceId.startsWith("file_")) {
             speechPending = false
         }
 
@@ -403,7 +405,6 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
         val id = utteranceCounter.incrementAndGet()
         val fileId = "file_$id"
-        val localId = "local_$id"
 
         val outputFile = File(
             requireContext().cacheDir,
@@ -428,17 +429,9 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             return
         }
 
-        val speakResult = tts.speak(
-            text,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            localId
-        )
-
-        if (speakResult == TextToSpeech.ERROR) {
-            speechPending = false
-            Log.e(TAG, "Unable to speak detection")
-        }
+        // Deliberately do not call tts.speak(): that plays through the phone.
+        // The synthesized WAV is sent to the Raspberry Pi, which plays it
+        // through its own wired headphone output.
     }
 
     private fun sendAudioToRaspberryPi(file: File) {
@@ -448,12 +441,14 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             file.length() > MAX_AUDIO_SIZE
         ) {
             file.delete()
+            speechPending = false
             Log.e(TAG, "Audio file missing, empty, or too large")
             return
         }
 
         if (!::audioExecutor.isInitialized || audioExecutor.isShutdown) {
             file.delete()
+            speechPending = false
             return
         }
 
@@ -500,10 +495,12 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                     Log.e(TAG, "Failed to send audio to Raspberry Pi", e)
                 } finally {
                     file.delete()
+                    speechPending = false
                 }
             }
         } catch (e: Exception) {
             file.delete()
+            speechPending = false
             Log.e(TAG, "Could not queue audio transfer", e)
         }
     }
