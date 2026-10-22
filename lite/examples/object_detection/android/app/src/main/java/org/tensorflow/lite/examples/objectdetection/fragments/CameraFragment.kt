@@ -198,13 +198,24 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             if (!::objectDetectorHelper.isInitialized) return
             var bitmap = bitmapBuffer
             if (bitmap == null || bitmap.width != image.width || bitmap.height != image.height) {
-                bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+                bitmap = Bitmap.createBitmap(
+                    image.width,
+                    image.height,
+                    Bitmap.Config.ARGB_8888
+                )
                 bitmapBuffer = bitmap
             }
+
+            // Use a non-null local reference after creating/reusing the bitmap.
+            val currentBitmap = bitmap ?: return
+
             val planeBuffer = image.planes[0].buffer
             planeBuffer.rewind()
-            bitmap.copyPixelsFromBuffer(planeBuffer)
-            objectDetectorHelper.detect(bitmap, image.imageInfo.rotationDegrees)
+            currentBitmap.copyPixelsFromBuffer(planeBuffer)
+            objectDetectorHelper.detect(
+                currentBitmap,
+                image.imageInfo.rotationDegrees
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Object detection failed", e)
         } finally {
