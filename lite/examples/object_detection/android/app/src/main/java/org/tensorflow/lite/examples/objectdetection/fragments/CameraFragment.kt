@@ -1,8 +1,6 @@
 /*
  * Copyright 2022 The TensorFlow Authors. All Rights Reserved.
- *
  * Licensed under the Apache License, Version 2.0.
- * See https://www.apache.org/licenses/LICENSE-2.0
  */
 
 package org.tensorflow.lite.examples.objectdetection.fragments
@@ -39,11 +37,13 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
 
 class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
 
     companion object {
-        private const val TAG = "ObjectDetection"
+        private const val TAG = "ThirdEye"
         private const val PI_HOST = "10.242.215.42"
         private const val PI_PORT = 5001
         private const val CONNECT_TIMEOUT_MS = 3000
@@ -51,64 +51,59 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
         private const val MAX_AUDIO_SIZE = 10 * 1024 * 1024
         private const val REQUIRED_STABLE_FRAMES = 3
         private const val MIN_ANNOUNCEMENT_GAP_MS = 2000L
-        private const val SAME_LABEL_REPEAT_DELAY_MS = 6000L
+        private const val SAME_DESCRIPTION_REPEAT_DELAY_MS = 6000L
         private const val SPEECH_CONFIDENCE_THRESHOLD = 0.60f
     }
 
     private var _fragmentCameraBinding: FragmentCameraBinding? = null
-    private val fragmentCameraBinding: FragmentCameraBinding
+    private val binding: FragmentCameraBinding
         get() = _fragmentCameraBinding
             ?: throw IllegalStateException("Camera binding is unavailable")
 
     private lateinit var objectDetectorHelper: ObjectDetectorHelper
-    private lateinit var bitmapBuffer: Bitmap
+    private var bitmapBuffer: Bitmap? = null
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var audioExecutor: ExecutorService
-
     private var preview: Preview? = null
     private var imageAnalyzer: ImageAnalysis? = null
     private var camera: Camera? = null
     private var cameraProvider: ProcessCameraProvider? = null
 
-    private var textToSpeech: TextToSpeech? = null
-    private var ttsReady = false
+    @Volatile private var textToSpeech: TextToSpeech? = null
+    @Volatile private var ttsReady = false
     @Volatile private var speechPending = false
     private val audioFiles = ConcurrentHashMap<String, File>()
+    private val utteranceCounter = AtomicLong(0L)
 
-    private var candidateLabel = ""
+    private var candidateDescription = ""
     private var candidateCount = 0
-    private var lastAnnouncedLabel = ""
+    private var lastAnnouncedDescription = ""
     private var lastAnnouncementTime = 0L
-    private var lastLabelAnnouncementTime = 0L
-    private var utteranceCounter = 0L
+    private var lastDescriptionAnnouncementTime = 0L
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        _fragmentCameraBinding =
-            FragmentCameraBinding.inflate(inflater, container, false)
-        return fragmentCameraBinding.root
+        _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
+        return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
         cameraExecutor = Executors.newSingleThreadExecutor()
         audioExecutor = Executors.newSingleThreadExecutor()
 
-        fragmentCameraBinding.viewFinder.implementationMode =
+        binding.viewFinder.implementationMode =
             androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
-
-        initializeTextToSpeech()
 
         objectDetectorHelper = ObjectDetectorHelper(
             context = requireContext(),
             objectDetectorListener = this
         )
-
-        fragmentCameraBinding.viewFinder.post {
+        initializeTextToSpeech()
+        binding.viewFinder.post {
             if (_fragmentCameraBinding != null) setUpCamera()
         }
     }
@@ -116,80 +111,76 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
     private fun initializeTextToSpeech() {
         textToSpeech = TextToSpeech(requireContext()) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val result = textToSpeech?.setLanguage(Locale.US)
-                ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
-                    result != TextToSpeech.LANG_NOT_SUPPORTED
+                val tts = textToSpeech ?: return@TextToSpeech
+                val languageResult = tts.setLanguage(Locale.US)
+                ttsReady = languageResult != TextToSpeech.LANG_MISSING_DATA &&
+                    languageResult != TextToSpeech.LANG_NOT_SUPPORTED
 
-                textToSpeech?.setOnUtteranceProgressListener(
-                    object : UtteranceProgressListener() {
-                        override fun onStart(utteranceId: String?) {
-                            Log.d(TAG, "Speech started: $utteranceId")
-                        }
+                tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        Log.d(TAG, "TTS started: $utteranceId")
+                    }
 
-                        override fun onDone(utteranceId: String?) {
-                            if (utteranceId != null) {
-                                audioFiles.remove(utteranceId)?.let {
-                                    sendAudioToRaspberryPi(it)
-                                }
-                            }
+                    override fun onDone(utteranceId: String?) {
+                        if (utteranceId == null) return
+                        // The synthesized file has its own ID; only the local speech ID
+                        // controls the speechPending flag.
+                        if (utteranceId.startsWith("file_")) {
+                            audioFiles.remove(utteranceId)?.let(::sendAudioToRaspberryPi)
+                        } else if (utteranceId.startsWith("local_")) {
                             speechPending = false
-                        }
-
-                        @Deprecated("Deprecated in Java")
-                        override fun onError(utteranceId: String?) {
-                            if (utteranceId != null) {
-                                audioFiles.remove(utteranceId)?.delete()
-                            }
-                            speechPending = false
-                            Log.e(TAG, "Speech synthesis failed")
-                        }
-
-                        override fun onError(utteranceId: String?, errorCode: Int) {
-                            if (utteranceId != null) {
-                                audioFiles.remove(utteranceId)?.delete()
-                            }
-                            speechPending = false
-                            Log.e(TAG, "Speech synthesis error: $errorCode")
                         }
                     }
-                )
-                Log.d(TAG, "Text-to-Speech initialized")
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        handleTtsError(utteranceId, null)
+                    }
+
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        handleTtsError(utteranceId, errorCode)
+                    }
+                })
+                Log.d(TAG, "Text-to-Speech initialized; ready=$ttsReady")
             } else {
                 ttsReady = false
-                Log.e(TAG, "Text-to-Speech initialization failed")
+                Log.e(TAG, "Text-to-Speech initialization failed: $status")
             }
         }
     }
 
+    private fun handleTtsError(utteranceId: String?, errorCode: Int?) {
+        if (utteranceId == null) return
+        if (utteranceId.startsWith("file_")) audioFiles.remove(utteranceId)?.delete()
+        if (utteranceId.startsWith("local_")) speechPending = false
+        Log.e(TAG, "TTS error for $utteranceId; code=$errorCode")
+    }
+
     private fun setUpCamera() {
-        val providerFuture = ProcessCameraProvider.getInstance(requireContext())
+        val context = context ?: return
+        val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             if (_fragmentCameraBinding == null) return@addListener
+            try {
+                cameraProvider = providerFuture.get()
+                preview = Preview.Builder()
+                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                    .setTargetRotation(binding.viewFinder.display.rotation)
+                    .build()
 
-            cameraProvider = providerFuture.get()
-
-            preview = Preview.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .setTargetRotation(fragmentCameraBinding.viewFinder.display.rotation)
-                .build()
-
-            imageAnalyzer = ImageAnalysis.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .setTargetRotation(fragmentCameraBinding.viewFinder.display.rotation)
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
-                .also { analyzer ->
-                    analyzer.setAnalyzer(cameraExecutor) { image ->
-                        if (_fragmentCameraBinding == null) {
-                            image.close()
-                        } else {
-                            detectObjects(image)
+                imageAnalyzer = ImageAnalysis.Builder()
+                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                    .setTargetRotation(binding.viewFinder.display.rotation)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .build()
+                    .also { analyzer ->
+                        analyzer.setAnalyzer(cameraExecutor) { image ->
+                            if (_fragmentCameraBinding == null) image.close()
+                            else detectObjects(image)
                         }
                     }
-                }
 
-            try {
                 cameraProvider?.unbindAll()
                 camera = cameraProvider?.bindToLifecycle(
                     viewLifecycleOwner,
@@ -197,34 +188,26 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
                     preview,
                     imageAnalyzer
                 )
-                preview?.setSurfaceProvider(
-                    fragmentCameraBinding.viewFinder.surfaceProvider
-                )
+                preview?.setSurfaceProvider(binding.viewFinder.surfaceProvider)
             } catch (e: Exception) {
-                Log.e(TAG, "Camera binding failed", e)
-                showToast("Unable to start camera")
+                Log.e(TAG, "Camera setup failed", e)
+                showToast("Unable to start camera: ${e.localizedMessage ?: "unknown error"}")
             }
-        }, ContextCompat.getMainExecutor(requireContext()))
+        }, ContextCompat.getMainExecutor(context))
     }
 
     private fun detectObjects(image: ImageProxy) {
         try {
             if (!::objectDetectorHelper.isInitialized) return
-
-            if (!::bitmapBuffer.isInitialized ||
-                bitmapBuffer.width != image.width ||
-                bitmapBuffer.height != image.height
-            ) {
-                bitmapBuffer = Bitmap.createBitmap(
-                    image.width,
-                    image.height,
-                    Bitmap.Config.ARGB_8888
-                )
+            var bitmap = bitmapBuffer
+            if (bitmap == null || bitmap.width != image.width || bitmap.height != image.height) {
+                bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+                bitmapBuffer = bitmap
             }
-
-            image.planes[0].buffer.rewind()
-            bitmapBuffer.copyPixelsFromBuffer(image.planes[0].buffer)
-            objectDetectorHelper.detect(bitmapBuffer, image.imageInfo.rotationDegrees)
+            val planeBuffer = image.planes[0].buffer
+            planeBuffer.rewind()
+            bitmap.copyPixelsFromBuffer(planeBuffer)
+            objectDetectorHelper.detect(bitmap, image.imageInfo.rotationDegrees)
         } catch (e: Exception) {
             Log.e(TAG, "Object detection failed", e)
         } finally {
@@ -238,152 +221,153 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
         imageHeight: Int,
         imageWidth: Int
     ) {
-        if (_fragmentCameraBinding == null) return
-
-        requireActivity().runOnUiThread {
-            if (_fragmentCameraBinding == null) return@runOnUiThread
-            if (results != null) processDetections(results)
+        val currentBinding = _fragmentCameraBinding ?: return
+        activity?.runOnUiThread {
+            if (_fragmentCameraBinding !== currentBinding) return@runOnUiThread
+            if (results != null) {
+                // Keep the standard TensorFlow Lite overlay updated with the detections.
+                currentBinding.overlay.setResults(results, imageHeight, imageWidth)
+                currentBinding.overlay.invalidate()
+                processDetections(results, imageWidth, imageHeight)
+            }
         }
     }
 
-    private fun processDetections(detections: List<Detection>) {
+    private fun processDetections(detections: List<Detection>, imageWidth: Int, imageHeight: Int) {
         val best = detections.mapNotNull { detection ->
-            val category = detection.categories.firstOrNull()
-                ?: return@mapNotNull null
-            if (category.score < SPEECH_CONFIDENCE_THRESHOLD) {
+            val category = detection.categories.firstOrNull() ?: return@mapNotNull null
+            if (category.score < SPEECH_CONFIDENCE_THRESHOLD || category.label.isBlank()) {
                 return@mapNotNull null
             }
-            category.label.takeIf { it.isNotBlank() }
-                ?.let { it to category.score }
+            val box = detection.boundingBox
+            val centerX = (box.left + box.right) / 2f
+            val boxHeightFraction = (box.height() / max(1, imageHeight)).coerceIn(0f, 1f)
+            val direction = when {
+                centerX < imageWidth * 0.38f -> "on your left"
+                centerX > imageWidth * 0.62f -> "on your right"
+                else -> "in front of you"
+            }
+            // Relative visual estimate only; not a calibrated measurement in metres.
+            val distance = when {
+                boxHeightFraction >= 0.55f -> "very close"
+                boxHeightFraction >= 0.30f -> "nearby"
+                boxHeightFraction >= 0.15f -> "at a medium distance"
+                else -> "farther away"
+            }
+            val description = "${category.label}, $direction, appears $distance"
+            Triple(detection, category.score, description)
         }.maxByOrNull { it.second }
 
         if (best == null) {
-            candidateLabel = ""
+            candidateDescription = ""
             candidateCount = 0
             return
         }
 
-        val label = best.first
-        if (label == candidateLabel) {
-            candidateCount++
-        } else {
-            candidateLabel = label
+        val description = best.third
+        if (description == candidateDescription) candidateCount++
+        else {
+            candidateDescription = description
             candidateCount = 1
         }
-
         if (candidateCount < REQUIRED_STABLE_FRAMES) return
 
         val now = SystemClock.elapsedRealtime()
         if (now - lastAnnouncementTime < MIN_ANNOUNCEMENT_GAP_MS) return
-        if (label == lastAnnouncedLabel &&
-            now - lastLabelAnnouncementTime < SAME_LABEL_REPEAT_DELAY_MS
+        if (description == lastAnnouncedDescription &&
+            now - lastDescriptionAnnouncementTime < SAME_DESCRIPTION_REPEAT_DELAY_MS
         ) return
         if (speechPending || !ttsReady) return
 
-        lastAnnouncedLabel = label
+        lastAnnouncedDescription = description
         lastAnnouncementTime = now
-        lastLabelAnnouncementTime = now
-        announceObject(label)
+        lastDescriptionAnnouncementTime = now
+        announceObject(description)
     }
 
-    private fun announceObject(label: String) {
+    private fun announceObject(description: String) {
         val tts = textToSpeech ?: return
-        if (!ttsReady || speechPending) return
-
-        val utteranceId = "object_${++utteranceCounter}"
-        val outputFile = File(requireContext().cacheDir, "$utteranceId.wav")
+        if (!ttsReady || speechPending || _fragmentCameraBinding == null) return
         speechPending = true
-        audioFiles[utteranceId] = outputFile
 
-        val synthesisResult = tts.synthesizeToFile(
-            "Detected $label",
-            Bundle(),
-            outputFile,
-            utteranceId
-        )
+        val id = utteranceCounter.incrementAndGet()
+        val fileId = "file_$id"
+        val localId = "local_$id"
+        val outputFile = File(requireContext().cacheDir, "$fileId.wav")
+        audioFiles[fileId] = outputFile
 
-        if (synthesisResult == TextToSpeech.ERROR) {
-            audioFiles.remove(utteranceId)
-            outputFile.delete()
+        val text = "Detected $description"
+        val fileResult = tts.synthesizeToFile(text, Bundle(), outputFile, fileId)
+        if (fileResult == TextToSpeech.ERROR) {
+            audioFiles.remove(fileId)?.delete()
             speechPending = false
-            Log.e(TAG, "Unable to synthesize speech")
+            Log.e(TAG, "Unable to synthesize WAV audio")
             return
         }
 
-        val speakResult = tts.speak(
-            "Detected $label",
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "${utteranceId}_local"
-        )
+        val speakResult = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, localId)
         if (speakResult == TextToSpeech.ERROR) {
-            Log.e(TAG, "Unable to speak object label")
+            speechPending = false
+            Log.e(TAG, "Unable to speak detection")
         }
     }
 
     private fun sendAudioToRaspberryPi(file: File) {
-        if (!file.exists() || file.length() <= 0L) {
+        if (!file.exists() || file.length() <= 0L || file.length() > MAX_AUDIO_SIZE) {
             file.delete()
+            Log.e(TAG, "Audio file missing, empty, or too large")
             return
         }
-        if (file.length() > MAX_AUDIO_SIZE) {
-            Log.e(TAG, "Audio file exceeds maximum allowed size")
-            file.delete()
-            return
-        }
-
         if (!::audioExecutor.isInitialized || audioExecutor.isShutdown) {
             file.delete()
             return
         }
 
-        audioExecutor.execute {
-            try {
-                Socket().use { socket ->
-                    socket.connect(
-                        InetSocketAddress(PI_HOST, PI_PORT),
-                        CONNECT_TIMEOUT_MS
-                    )
-                    socket.soTimeout = SOCKET_TIMEOUT_MS
-
-                    DataOutputStream(socket.getOutputStream()).use { output ->
-                        output.writeInt(file.length().toInt())
-                        FileInputStream(file).use { input ->
-                            val buffer = ByteArray(8192)
-                            var total = 0L
-                            while (true) {
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                total += count
-                                if (total > MAX_AUDIO_SIZE) {
-                                    throw IllegalStateException("Audio exceeds size limit")
+        try {
+            audioExecutor.execute {
+                try {
+                    Socket().use { socket ->
+                        socket.connect(InetSocketAddress(PI_HOST, PI_PORT), CONNECT_TIMEOUT_MS)
+                        socket.soTimeout = SOCKET_TIMEOUT_MS
+                        DataOutputStream(socket.getOutputStream()).use { output ->
+                            output.writeInt(file.length().toInt())
+                            FileInputStream(file).use { input ->
+                                val buffer = ByteArray(8192)
+                                var total = 0L
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    total += count
+                                    if (total > MAX_AUDIO_SIZE) error("Audio exceeds size limit")
+                                    output.write(buffer, 0, count)
                                 }
-                                output.write(buffer, 0, count)
+                                output.flush()
                             }
-                            output.flush()
                         }
                     }
+                    Log.d(TAG, "Audio sent to Raspberry Pi at $PI_HOST:$PI_PORT")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to send audio to Raspberry Pi", e)
+                } finally {
+                    file.delete()
                 }
-                Log.d(TAG, "Audio sent to Raspberry Pi")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send audio to Raspberry Pi", e)
-            } finally {
-                file.delete()
             }
+        } catch (e: Exception) {
+            file.delete()
+            Log.e(TAG, "Could not queue audio transfer", e)
         }
     }
 
-    // This signature matches ObjectDetectorHelper.DetectorListener in the build log.
     override fun onError(error: String) {
         Log.e(TAG, "Detector error: $error")
         showToast(error)
     }
 
     private fun showToast(message: String) {
-        if (!isAdded) return
-        requireActivity().runOnUiThread {
-            if (isAdded) {
-                Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+        val context = context ?: return
+        activity?.runOnUiThread {
+            if (_fragmentCameraBinding != null) {
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -399,22 +383,20 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             imageAnalyzer = null
             camera = null
             cameraProvider = null
-
             if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
             if (::audioExecutor.isInitialized) audioExecutor.shutdown()
-
             textToSpeech?.stop()
             textToSpeech?.shutdown()
             textToSpeech = null
             ttsReady = false
             speechPending = false
-
             audioFiles.values.forEach { it.delete() }
             audioFiles.clear()
+            bitmapBuffer?.recycle()
+            bitmapBuffer = null
         } catch (e: Exception) {
             Log.e(TAG, "Error cleaning up camera resources", e)
         }
-
         _fragmentCameraBinding = null
         super.onDestroyView()
     }
